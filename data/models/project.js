@@ -4,6 +4,9 @@ const projectSchema = new mongoose.Schema({
     id_project: {
         type: String,
     },
+    id_user: {
+        type: String,
+    },
     id_network: {
         type: String,
         required: true
