@@ -3,6 +3,7 @@ const Result = require('./data/models/result');
 const Network = require('./data/models/network');
 const NetworkGlm = require('./data/models/networkGlm');
 const Project = require('./data/models/project');
+const NodeLink = require('./data/models/nodeLinks');
 const { s1_Livepanel, s2_Livepanel, s3_Livepanel } = require('./data/models/livepanel');
 const MongoDatabase = require('./data/database');
 
@@ -37,6 +38,9 @@ const dbUrl = process.env.MONGO_URL;
 const dbName = process.env.MONGO_DB_NAME;
 const API_URL = process.env.API_URL;
 
+function roundTo5(num) {
+    return Math.round(num * 1e5) / 1e5;
+}
 
 async function glm2json2(data, id){
 
@@ -72,18 +76,18 @@ async function glm2json2(data, id){
     });
 
     const respData = await axios.get(`${API_URL}/${token}/run/-C ${inputFileName} -o salida${token}.json`);
+    const glmRespData = await axios.get(`${API_URL}/${token}/run/ -C salida${token}.json -o salida${token}.glm`);
     const jsonData = await axios.get(`${API_URL}/${token}/download/salida${token}.json`);
+    const glmData = await axios.get(`${API_URL}/${token}/download/salida${token}.glm`);
     
-
     const {data:errorData} = await axios.get(`${API_URL}/${token}/download/stderr`);
     console.log(respData.data);
     
     axios.get(`${API_URL}/${token}/close`);
 
-    console.log({ ...respData.data , ...errorData });
     //{ json: jsonData.data.content , ...respData.data , ...errorData }
 
-    return  { json: jsonData.data.content , status: respData.data.status , content: errorData.content };
+    return  { json: jsonData.data.content , glm:glmData.data.content ,status: respData.data.status , content: errorData.content };
 }
 
 
@@ -347,17 +351,32 @@ app.get('/networks', async (req, res) => {
 
 app.put('/updateNetwork/:id', async (req, res) => {
     try {
+
+        const id = req.params.id;
+        const updatedNetwork = await Network.findById(id); // Buscar la red
+
+        if (!updatedNetwork) {
+            return res.status(404).send('Network no encontrada');
+        }
+        
+
+        // Aplicar los cambios del body
+        updatedNetwork.set(req.body);
+
+
+
+        /*    
         const updatedNetwork = await Network.findByIdAndUpdate(
             req.params.id, // El ID de la network que vamos a actualizar
             { $set: req.body }, // Los datos nuevos para la network
             { new: true, runValidators: true } // Opciones: retornar el documento actualizado y validar el nuevo esquema
         );
         
-        const id = req.params.id;
+        
 
         if (!updatedNetwork) {
             return res.status(404).send('Network no encontrada');
-        }
+        }*/
 
         const excluir = ["_id", "network_name", "__v"];
 
@@ -375,6 +394,7 @@ app.put('/updateNetwork/:id', async (req, res) => {
         const allFiles = fs.readdirSync(uploadDir, { withFileTypes: true });
         const filesToUpload = allFiles.filter(f => f.isFile() || (f.isDirectory() && f.name !== 'records'));
         console.log(filesToUpload);
+
         // 2. Subir archivos
         for (const file of filesToUpload) {
           const filePath = path.join(uploadDir, file.name);
@@ -399,24 +419,28 @@ app.put('/updateNetwork/:id', async (req, res) => {
           headers: inputForm.getHeaders(),
         });
   
-        await axios.get(`${API_URL}/${token}/run/-C ${inputFileName} -o salida${token}.glm`);
+        const responseSim = await axios.get(`${API_URL}/${token}/run/-C ${inputFileName} -o salida${token}.glm`);
         const glmData = await axios.get(`${API_URL}/${token}/download/salida${token}.glm`);
         axios.get(`${API_URL}/${token}/close`);
-         // Buscar y actualizar el documento correspondiente
-        const updatedGlm = await NetworkGlm.findOneAndUpdate(
-            { id_network: id },
-            { $set: { glm: glmData.data.content } },
-            { new: true } // Retornar el documento actualizado
-        );
 
-        if (!updatedGlm) {
-            return res.status(404).send('Red no encontrada para actualizar');
-        } 
+        if(responseSim.data.status !== "ERROR"){
+            // Buscar y actualizar el documento correspondiente
+            const updatedGlm = await NetworkGlm.findOneAndUpdate(
+                { id_network: id },
+                { $set: { glm: glmData.data.content } },
+                { new: true } // Retornar el documento actualizado
+            );
 
-        console.log(glmData);
+            if (!updatedGlm) {
+                return res.status(404).send('Red no encontrada para actualizar');
+            } 
+            await updatedNetwork.save();
+            res.status(200).json(updatedNetwork); // Retornamos la network actualizada
 
-        res.status(200).json(updatedNetwork); // Retornamos la network actualizada
-    
+        }else{
+            res.status(500).json({status: responseSim.data.status, content: responseSim.data.content});
+        }
+          
     } catch (error) {
         console.error('Error al actualizar la network:', error);
         res.status(500).send('Error al actualizar la network');
@@ -538,12 +562,19 @@ app.post('/addglm/:id', async (req, res) => {
                     glmContent.slice(closingBracketIndex+1); // El último '}'
             }
 
+
+
             const jsonOutput = await glm2json2(glmContent, req.params.id);
-            console.log(jsonOutput);
-            
+
             if (jsonOutput.status != "ERROR" ) {
                 const updatedNetworkJson = await JSON.parse(jsonOutput.json);
-                
+
+                const updatedNetworkGlm = await NetworkGlm.findOneAndUpdate(
+                    { id_network: req.params.id },
+                    { $set: { glm: jsonOutput.glm } },
+                    { new: true } // Retornar el documento actualizado
+                );
+                                
                 // Actualizar la red en la base de datos
                 const updatedNetwork = await Network.findByIdAndUpdate(
                     req.params.id, 
@@ -614,17 +645,17 @@ app.get('/links/:networkId', async (req, res) => {
                 };
 
                 nodes.push({
-                    id: key,  // El key es el id del nodo
+                    id: object.guid,  // El key es el id del nodo
+                    guid: object.guid, 
                     label: key,  // El key también se usará como label
-                    characteristics: (object.voltage_A)?([ {voltage_A:(polarA.r/nominal)}, {voltage_B:(polarB.r/nominal)}, {voltage_C:(polarC.r/nominal)} ]):([]), // Por ahora vacío
+                    characteristics: (object.voltage_A)?([ {voltage_A:roundTo5(polarA.r/nominal)}, {voltage_B:roundTo5(polarB.r/nominal)}, {voltage_C:roundTo5(polarC.r/nominal)}, {angle_A:roundTo5(polarA.theta)}, {angle_B:roundTo5(polarB.theta)} , {angle_C:roundTo5(polarC.theta)}  ]):([]), // Por ahora vacío
                     x: null,  // Las coordenadas vacías por ahora
                     y: null
                 });
             }
         });
 
-        // Paso 2: Filtrar los nodos que están en `to` o `from` de cualquier link
-        const nodeIdsInLinks = new Set(); // Usamos Set para evitar duplicados
+        const nodeIdsInLinks = new Set(); 
         console.log(nodes);
         
         links.forEach(link => {
@@ -632,11 +663,10 @@ app.get('/links/:networkId', async (req, res) => {
             if (link.target) nodeIdsInLinks.add(link.target);
         });
 
-        // Filtrar el array de nodos para quedarnos solo con los que están en `nodeIdsInLinks`
         const filteredNodes = nodes.filter(node => nodeIdsInLinks.has(node.label));
         const Nodes = filteredNodes.map((node, index) => ({
-            ...node,          // Mantener las otras propiedades del objeto
-            id: index + 1     // Reemplazar el id con una secuencia comenzando desde 1
+            ...node,          
+            id: index + 1     
         }));
 
         // Crear un mapa para reemplazar los IDs de los links
@@ -848,50 +878,59 @@ app.get('/projectsList/:userId', async (req, res) => {
     }
 });
 
-/*
 app.get('/api/livepanel', async (req, res) => {
     try {
-        // Obtener los parámetros de fecha desde y hasta
-        const { desde, hasta } = req.query;
-        console.log("Fechas recibidas:", { desde, hasta });
-
-        // Validar si los parámetros existen
-        if (!desde || !hasta) {
-            return res.status(400).json({ error: "Los parámetros 'desde' y 'hasta' son requeridos" });
-        }
-
-        // Convertir las fechas a objetos Date
-        const startDate = new Date(desde);
-        const endDate = new Date(hasta);
-        console.log("Fechas convertidas a Date:", { startDate, endDate });
-
-        // Validar que las fechas sean válidas
-        if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
-            return res.status(400).json({ error: "Las fechas proporcionadas son inválidas" });
-        }
-
-        // Ajustar las horas para asegurar que se incluye todo el rango del día
-        startDate.setSeconds(0, 0);
-        endDate.setSeconds(59, 999);
-        console.log("Rango final de fechas:", { startDate, endDate });
-
-        // Consultar los datos de Livepanel dentro del rango de tiempo
-        const liveData = await Livepanel.find({
-            timestamp: {
-                $gte: startDate,  // Fecha desde
-                $lte: endDate     // Fecha hasta
-            }
-        });
-
-        console.log("Datos encontrados:", liveData.length);
-
-        // Enviar la respuesta con los datos filtrados
-        res.status(200).json(liveData);
+      // Obtener los parámetros de fecha desde y hasta
+      const { desde, hasta } = req.query;
+      console.log("Fechas recibidas:", { desde, hasta });
+  
+      // Validar si los parámetros existen
+      if (!desde || !hasta) {
+        return res.status(400).json({ error: "Los parámetros 'desde' y 'hasta' son requeridos" });
+      }
+  
+      // Convertir las fechas a objetos Date
+      const startDate = new Date(desde);
+      const endDate = new Date(hasta);
+      console.log("Fechas convertidas a Date:", { startDate, endDate });
+  
+      // Validar que las fechas sean válidas
+      if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+        return res.status(400).json({ error: "Las fechas proporcionadas son inválidas" });
+      }
+  
+      // Ajustar las horas para incluir todo el rango del día
+      startDate.setSeconds(0, 0);
+      endDate.setSeconds(59, 999);
+      console.log("Rango final de fechas:", { startDate, endDate });
+  
+      // Consultar los datos de cada sensor
+      const s1Data = await s1_Livepanel.find({
+        timestamp: { $gte: startDate, $lte: endDate }
+      }).sort({ timestamp: 1 });
+      
+      const s2Data = await s2_Livepanel.find({
+        timestamp: { $gte: startDate, $lte: endDate }
+      }).sort({ timestamp: 1 });
+      
+      const s3Data = await s3_Livepanel.find({
+        timestamp: { $gte: startDate, $lte: endDate }
+      }).sort({ timestamp: 1 });
+  
+      console.log("Datos encontrados:", {
+        s1: s1Data.length,
+        s2: s2Data.length,
+        s3: s3Data.length
+      });
+  
+      // Enviar la respuesta identificando los datos de cada sensor
+      res.status(200).json({ s1Data, s2Data, s3Data });
+      
     } catch (error) {
-        console.error("Error al obtener los datos de Livepanel:", error);
-        res.status(500).json({ error: "Error al obtener los datos" });
+      console.error("Error al obtener los datos de Livepanel:", error);
+      res.status(500).json({ error: "Error al obtener los datos" });
     }
-});*/
+});
 
 app.post('/json2glm', async (req, res) => {
     try {
@@ -1104,9 +1143,10 @@ app.get('/testLinks/:networkId', async (req, res) => {
                 };
 
                 nodes.push({
-                    id: key,  // El key es el id del nodo
+                    id: object.guid,  // El key es el id del nodo
+                    guid: object.guid,
                     label: key,  // El key también se usará como label
-                    characteristics: (object.voltage_A)?([ {voltage_A:(polarA.r/nominal)}, {voltage_B:(polarB.r/nominal)}, {voltage_C:(polarC.r/nominal)} ]):([]), // Por ahora vacío
+                    characteristics: (object.voltage_A)?([ {voltage_A:roundTo5(polarA.r/nominal)}, {voltage_B:roundTo5(polarB.r/nominal)}, {voltage_C:roundTo5(polarC.r/nominal)}, {angle_A:roundTo5(polarA.theta)}, {angle_B:roundTo5(polarB.theta)} , {angle_C:roundTo5(polarC.theta)}   ]):([]), // Por ahora vacío
                     x: null,  // Las coordenadas vacías por ahora
                     y: null
                 });
@@ -1155,6 +1195,63 @@ app.get('/testLinks/:networkId', async (req, res) => {
     }
 
 });
+
+app.get('/nodelinks/:id', async (req, res) => {
+    try {
+        const nodeLink = await NodeLink.findOne({ id_network: req.params.id });
+        if (!nodeLink) {
+            return res.status(404).send('NodeLink no encontrado');
+        }
+        res.status(200).json(nodeLink);
+    } catch (error) {
+        console.error('Error al obtener el NodeLink:', error);
+        res.status(500).send('Error al obtener el NodeLink');
+    }
+});
+
+
+app.put('/nodelinks/:id', async (req, res) => {
+    try {
+        const { nodes, links, id_user } = req.body;
+        const id_network = req.params.id;
+
+        const updated = await NodeLink.findOneAndUpdate(
+            { id_network },
+            {
+                $set: { nodes, links },
+                $setOnInsert: {
+                    id_network,
+                    id_user: id_user || null
+                }
+            },
+            {
+                new: true,
+                upsert: true,
+                setDefaultsOnInsert: true
+            }
+        );
+
+        res.status(200).json(updated);
+    } catch (error) {
+        console.error('Error al actualizar o crear el NodeLink:', error);
+        res.status(500).send('Error al actualizar o crear el NodeLink');
+    }
+});
+
+
+app.delete('/nodelinks/:id', async (req, res) => {
+    try {
+        const deleted = await NodeLink.findByIdAndDelete(req.params.id);
+        if (!deleted) {
+            return res.status(404).send('NodeLink no encontrado');
+        }
+        res.status(200).send('NodeLink eliminado correctamente');
+    } catch (error) {
+        console.error('Error al eliminar el NodeLink:', error);
+        res.status(500).send('Error al eliminar el NodeLink');
+    }
+});
+
 
 mqttClient.on("connect", () => {
     console.log("Conectado al broker MQTT");
